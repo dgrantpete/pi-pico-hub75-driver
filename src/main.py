@@ -64,7 +64,7 @@ def _init():
 
     print("Initializing driver...")
     driver = Hub75Driver(
-        row_addressing=row_addressing.Direct(
+        row_addressing=row_addressing.Binary(
             base_pin=Pin(BASE_ADDRESS_PIN),
             bit_count=bit_length(HEIGHT // 2 - 1)
         ),

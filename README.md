@@ -29,7 +29,7 @@ Benchmarks on a 64x64 panel:
 
 ## Wiring
 
-Default pin configuration for **direct addressing** panels (editable in `main.py`):
+Default pin configuration for **binary addressing** panels (editable in `main.py`):
 
 | HUB75 Pin | GPIO | Description |
 |-----------|------|-------------|
@@ -148,9 +148,9 @@ print_pinout()       # Show wiring for your configuration
 from hub75 import Hub75Driver, Hub75Display, row_addressing
 from machine import Pin
 
-# Initialize driver (most panels use Direct addressing)
+# Initialize driver (most panels use Binary addressing)
 driver = Hub75Driver(
-    row_addressing=row_addressing.Direct(
+    row_addressing=row_addressing.Binary(
         base_pin=Pin(9),        # First address GPIO (consecutive pins for each address line)
         bit_count=5             # Number of address pins on your panel
     ),
@@ -317,20 +317,20 @@ The scan rate tells you what fraction of rows are lit simultaneously:
 
 ### Row Addressing
 
-HUB75 panels use two different methods to select which row is active. **Most panels use direct addressing** — if you're unsure, start with direct addressing.
+HUB75 panels use several different methods to select which row is active. **Most panels use binary addressing** — if you're unsure, start with binary addressing.
 
-#### Direct Addressing (most panels)
+#### Binary Addressing (most panels)
 
-The most common type. The panel has binary address pins that directly select the active row. The number of address pins varies by panel — for example, 4 pins (A-D) can select 16 rows, and 5 pins (A-E) can select 32 rows.
+The most common type. The panel has address pins (A, B, C, D, E) that encode the active row as a binary number. The number of address pins varies by panel — for example, 4 pins (A-D) can select 16 rows, and 5 pins (A-E) can select 32 rows.
 
-**How to identify:** Most standard indoor panels use direct addressing. If you're unsure which type your panel uses, start here — if the rows display incorrectly (only one row lights up, or rows appear in the wrong order), try shift register addressing instead.
+**How to identify:** Most standard indoor panels use binary addressing. If you're unsure which type your panel uses, start here — if the rows display incorrectly (only one row lights up, or rows appear in the wrong order), try shift register addressing instead.
 
 ```python
 from hub75 import Hub75Driver, row_addressing
 from machine import Pin
 
 driver = Hub75Driver(
-    row_addressing=row_addressing.Direct(
+    row_addressing=row_addressing.Binary(
         base_pin=Pin(9),    # First address GPIO (consecutive pins for each address line)
         bit_count=5          # Number of address pins on your panel
     ),
@@ -353,7 +353,7 @@ The address pins must be on **consecutive GPIOs** starting from `base_pin`.
 
 Some panels — particularly certain outdoor panels, very large panels, or panels with high row counts — use a shift register chain to select the active row instead of binary address pins. Rather than outputting a binary address, the driver clocks a single '1' bit through the shift register, and the position of that bit determines which row is active.
 
-**How to identify:** If your panel doesn't work with direct addressing (wrong rows light up, or only one row works), it may use shift register addressing. The HUB75 connector's address pins (A, B, C) serve different roles:
+**How to identify:** If your panel doesn't work with binary addressing (wrong rows light up, or only one row works), it may use shift register addressing. The HUB75 connector's address pins (A, B, C) serve different roles:
 - **A** = shift register clock
 - **B** = shift register enable (active low — connect to GND or hold low externally)
 - **C** = shift register data input
@@ -419,7 +419,7 @@ Gamma correction can also be changed at runtime with `driver.set_gamma(...)`.
 
 ### Common Panel Configurations
 
-**Standard indoor panels** (2 rows lit at a time, direct addressing):
+**Standard indoor panels** (2 rows lit at a time, binary addressing):
 
 | Panel | Scan Rate | `bit_count` | `shift_register_depth` |
 |-------|-----------|-------------|------------------------|
@@ -440,14 +440,14 @@ For outdoor panels, `shift_register_depth = width × (rows_lit_at_once / 2)`.
 
 ### Complete Configuration Example
 
-For a **64×64 panel with 1/32 scan** (direct addressing):
+For a **64×64 panel with 1/32 scan** (binary addressing):
 
 ```python
 from hub75 import Hub75Driver, row_addressing
 from machine import Pin
 
 driver = Hub75Driver(
-    row_addressing=row_addressing.Direct(
+    row_addressing=row_addressing.Binary(
         base_pin=Pin(9),        # Address lines on consecutive GPIOs starting here
         bit_count=5              # Number of address pins (5 for 1/32 scan)
     ),
@@ -468,7 +468,7 @@ For **horizontally chained** panels (e.g., two 64×64 panels side by side = 128�
 ```python
 # Two 64x64 panels chained horizontally
 driver = Hub75Driver(
-    row_addressing=row_addressing.Direct(
+    row_addressing=row_addressing.Binary(
         base_pin=Pin(9),
         bit_count=5
     ),
@@ -490,7 +490,7 @@ driver = Hub75Driver(
 - Verify your panel's actual scan rate matches your config
 
 **Only one row lights up, or rows appear in the wrong order?**
-- Your panel may use shift register addressing instead of direct addressing. See [Shift Register Addressing](#shift-register-addressing-some-panels) above.
+- Your panel may use shift register addressing instead of binary addressing. See [Shift Register Addressing](#shift-register-addressing-some-panels) above.
 
 **Flickering or dim display?**
 - Ensure adequate 5V power supply (panels can draw 2-4A at full brightness)
@@ -505,13 +505,13 @@ Edit the pin constants to match your wiring:
 BASE_DATA_PIN = 0       # First GPIO for R1,G1,B1,R2,G2,B2 (consecutive)
 BASE_CLOCK_PIN = 6      # First GPIO for CLK,LAT (consecutive)
 OUTPUT_ENABLE_PIN = 8   # GPIO for OE
-BASE_ADDRESS_PIN = 9    # First GPIO for address lines (consecutive for Direct)
+BASE_ADDRESS_PIN = 9    # First GPIO for address lines (consecutive for Binary)
 ```
 
 The driver expects pins in consecutive groups:
 - **Data pins**: 6 consecutive GPIOs (R1, G1, B1, R2, G2, B2)
 - **Clock pins**: 2 consecutive GPIOs (CLK, LAT)
-- **Address pins (Direct)**: Consecutive GPIOs for each address line on your panel (varies by scan rate)
+- **Address pins (Binary)**: Consecutive GPIOs for each address line on your panel (varies by scan rate)
 - **Address pins (ShiftRegister)**: Clock and data pins specified individually
 
 ## API Reference
@@ -525,7 +525,7 @@ Low-level driver for direct hardware control.
 ```python
 Hub75Driver(
     *,
-    row_addressing: row_addressing.Direct | row_addressing.ShiftRegister,
+    row_addressing: row_addressing.Binary | row_addressing.ShiftRegister,
     shift_register_depth: int,
     base_data_pin: Pin,
     base_clock_pin: Pin,
@@ -543,7 +543,7 @@ Hub75Driver(
 
 | Type | Parameters | Description |
 |------|-----------|-------------|
-| `row_addressing.Direct(base_pin, bit_count)` | `base_pin`: first address GPIO, `bit_count`: number of address pins | Standard binary address pins |
+| `row_addressing.Binary(base_pin, bit_count)` | `base_pin`: first address GPIO, `bit_count`: number of address pins | Standard binary address pins |
 | `row_addressing.ShiftRegister(data_pin, clock_pin, depth, clock_frequency=None)` | `data_pin`: data GPIO, `clock_pin`: clock GPIO, `depth`: addressable rows, `clock_frequency`: optional clock speed | Shift register row selection |
 
 **Frame Operations:**

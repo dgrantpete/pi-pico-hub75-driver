@@ -9,7 +9,7 @@ from micropython import const
 import _thread
 import re
 
-from .row_addressing import Direct, ShiftRegister
+from .row_addressing import Binary, ShiftRegister
 from .gamma import SRGB, Power
 from pio_types import *
 
@@ -64,7 +64,7 @@ class Hub75Driver:
     def __init__(
             self,
             *,
-            row_addressing: Direct | ShiftRegister,
+            row_addressing: Binary | ShiftRegister,
             shift_register_depth: int,
             pio: rp2.PIO | None = None,
             output_enable_pin: machine.Pin,
@@ -76,7 +76,7 @@ class Hub75Driver:
             gamma: SRGB | Power | None = SRGB(),
             target_refresh_rate: float = 120.0
         ):
-        if isinstance(row_addressing, Direct):
+        if isinstance(row_addressing, Binary):
             self._row_address_count = 1 << row_addressing.bit_count
         elif isinstance(row_addressing, ShiftRegister):
             self._row_address_count = row_addressing.depth
@@ -563,7 +563,7 @@ class Hub75Driver:
     @micropython.native
     def _create_state_machines(
         *,
-        row_addressing: Direct | ShiftRegister,
+        row_addressing: Binary | ShiftRegister,
         pio: rp2.PIO,
         pio_block_id: int,
         output_enable_pin: machine.Pin,
@@ -580,7 +580,7 @@ class Hub75Driver:
             pio_block_id, _ADDRESS_STATE_MACHINE_OFFSET
         )
 
-        if isinstance(row_addressing, Direct):
+        if isinstance(row_addressing, Binary):
             address_decorator = rp2.asm_pio(
                 sideset_init=rp2.PIO.OUT_HIGH,
                 out_init=[rp2.PIO.OUT_LOW] * row_addressing.bit_count,
@@ -715,7 +715,7 @@ class Hub75Driver:
         # Seed data state machine with number of bits to clock out for each address
         data_state_machine.put(shift_register_depth - 1)
 
-        if isinstance(row_addressing, Direct):
+        if isinstance(row_addressing, Binary):
             address_state_machine = rp2.StateMachine(
                 address_state_machine_id,
                 address_program,

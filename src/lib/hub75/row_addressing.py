@@ -1,6 +1,6 @@
 from machine import Pin
 
-class Direct:
+class Binary:
     def __init__(self, base_pin: Pin, bit_count: int):
         self._base_pin = base_pin
         self._bit_count = bit_count
