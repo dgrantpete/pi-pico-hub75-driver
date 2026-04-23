@@ -27,6 +27,11 @@ class Hub75Display(framebuf.FrameBuffer):
     @micropython.native
     def height(self) -> int:
         return self._height
+    
+    @property
+    @micropython.native
+    def buffer(self) -> bytearray:
+        return self._buffer
 
     @micropython.native
     def show(self) -> None:
