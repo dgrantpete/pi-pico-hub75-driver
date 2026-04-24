@@ -841,6 +841,7 @@ class Hub75Driver:
                 sideset_init=rp2.PIO.OUT_HIGH,
                 out_init=[rp2.PIO.OUT_LOW] * row_addressing.bit_count,
                 out_shiftdir=rp2.PIO.SHIFT_RIGHT,
+                in_shiftdir=rp2.PIO.SHIFT_RIGHT,
                 autopull=True,
                 pull_thresh=32
             )
@@ -848,11 +849,20 @@ class Hub75Driver:
             # increment_address normal path: jmp(x_dec) taken + mov(pins, invert(x))
             address_update_cycles = 2
             # Partial increment_address (2: jmp(x_dec) not taken + jmp to increment_bitplane)
-            # + out(null, 32) + increment_bitplane() (1) + out(isr, 32)
-            bitplane_transition_extra_cycles = 5
+            # + out(null, 32) + increment_bitplane() (4) + out(isr, 32)
+            bitplane_transition_extra_cycles = 8
 
             def increment_bitplane():
-                set(x, (0b1 << row_addressing.bit_count)).side(OE_DEASSERTED)
+                # We need x = (1 << bit_count). PIO's SET has a 5-bit immediate,
+                # so for bit_count >= 5 we can't load that value directly — the
+                # assembler silently drops the high bit and we end up with 0,
+                # which sends the address SM into an infinite non-displaying loop.
+                # Build the value in ISR instead: seed with a single '1' bit and
+                # shift it into position (bit_count) with in_ + SHIFT_RIGHT.
+                set(x, 1).side(OE_DEASSERTED)
+                mov(isr, null).side(OE_DEASSERTED)
+                in_(x, 32 - row_addressing.bit_count).side(OE_DEASSERTED)
+                mov(x, isr).side(OE_DEASSERTED)
 
             def increment_address():
                 jmp(x_dec, "write_address")            .side(OE_DEASSERTED)
@@ -863,11 +873,28 @@ class Hub75Driver:
                 mov(pins, invert(x)).side(OE_DEASSERTED)
 
         elif isinstance(row_addressing, ShiftRegister):
+            depth = row_addressing.depth
+            if depth < 1:
+                raise ValueError(f"ShiftRegister depth must be at least 1 (got {depth})")
+
+            # PIO's SET instruction has a 5-bit immediate (max value 31). For
+            # depth <= 31 we can load x directly with set(x, depth). Above that
+            # we fall back to the same ISR construction used by Binary, which
+            # only produces powers of 2.
+            use_isr_load = depth > 31
+            if use_isr_load and (depth & (depth - 1)) != 0:
+                raise ValueError(
+                    f"ShiftRegister depth of {depth} is not supported: depths above 31 "
+                    f"must be a power of 2 (the PIO SET instruction's 5-bit immediate "
+                    f"field can't encode larger arbitrary values)."
+                )
+
             address_decorator = rp2.asm_pio(
                 sideset_init=rp2.PIO.OUT_HIGH,
                 out_init=rp2.PIO.OUT_LOW,
                 set_init=rp2.PIO.OUT_LOW,
                 out_shiftdir=rp2.PIO.SHIFT_RIGHT,
+                in_shiftdir=rp2.PIO.SHIFT_RIGHT,
                 autopull=True,
                 pull_thresh=32
             )
@@ -898,11 +925,28 @@ class Hub75Driver:
             # + set(pins, 1)[d] + set(pins, 0)[d] + mov(pins, null)[d]
             address_update_cycles = 1 + 3 * (1 + shift_register_delay)
             # Partial increment_address (2: jmp(x_dec) not taken + jmp to increment_bitplane; no delays)
-            # + out(null, 32) + increment_bitplane() (2 + d) + out(isr, 32)
-            bitplane_transition_extra_cycles = 6 + shift_register_delay
+            # + out(null, 32) + increment_bitplane() + out(isr, 32).
+            # increment_bitplane is (2 + d) with direct SET, or (5 + d) with the
+            # ISR construction needed for depths above 31.
+            _increment_bitplane_cycles = (5 + shift_register_delay) if use_isr_load else (2 + shift_register_delay)
+            bitplane_transition_extra_cycles = 4 + _increment_bitplane_cycles
 
             def increment_bitplane():
-                set(x, row_addressing.depth).side(OE_DEASSERTED)
+                if use_isr_load:
+                    # depth > 31: SET's 5-bit immediate can't hold it, and we've
+                    # already checked that depth is a power of 2. Build x = depth
+                    # by placing a single '1' bit at position log2(depth) in ISR.
+                    log2_depth = 0
+                    _value = depth
+                    while _value > 1:
+                        _value >>= 1
+                        log2_depth += 1
+                    set(x, 1).side(OE_DEASSERTED)
+                    mov(isr, null).side(OE_DEASSERTED)
+                    in_(x, 32 - log2_depth).side(OE_DEASSERTED)
+                    mov(x, isr).side(OE_DEASSERTED)
+                else:
+                    set(x, depth).side(OE_DEASSERTED)
                 mov(pins, invert(null)).side(OE_DEASSERTED) [shift_register_delay]
 
             def increment_address():
