@@ -56,6 +56,17 @@ For **shift register addressing** panels, the address pins carry different signa
 | B | — | Shift register enable (directly connect to GND or hold low externally) |
 | C | — | Shift register data |
 
+For **direct addressing** panels, each addressable row is driven by its own dedicated GPIO on consecutive pins starting from `base_pin`:
+
+| Row-select Pin | GPIO | Description |
+|----------------|------|-------------|
+| Row-select 0   | —    | Row 0 select (one-hot: high when row 0 is active) |
+| Row-select 1   | —    | Row 1 select |
+| Row-select …   | —    | … additional consecutive GPIOs, one per row … |
+| Row-select N-1 | —    | Row N-1 select |
+
+The number of consecutive GPIOs equals `address_count` (one pin per addressable row).
+
 See [Row Addressing](#row-addressing) for how to identify which type your panel uses.
 
 Connect GND from the Pico to GND on the HUB75 panel.
@@ -317,7 +328,7 @@ The scan rate tells you what fraction of rows are lit simultaneously:
 
 ### Row Addressing
 
-HUB75 panels use several different methods to select which row is active. **Most panels use binary addressing** — if you're unsure, start with binary addressing.
+HUB75 panels use several different methods to select which row is active. This driver supports three: **Binary** (most panels), **Shift Register** (some large/outdoor panels), and **Direct** (panels that expose one pin per row). **Most panels use binary addressing** — if you're unsure, start with binary addressing.
 
 #### Binary Addressing (most panels)
 
@@ -393,10 +404,103 @@ row_addressing.ShiftRegister(
 
 The driver will raise an error if the requested clock frequency is too low to achieve with the available PIO timing. In that case, the error message will tell you the minimum achievable frequency.
 
+#### Direct Addressing (uncommon)
+
+A minority of panels — typically small, custom, or DIY LED matrices — expose one dedicated row-select pin per addressable row instead of using binary-encoded address pins or a shift register. The driver drives these pins as a one-hot pattern: exactly one pin is high at a time, indicating the active row.
+
+**How to identify:** Most commercial HUB75 panels do **not** use this mode. Consider Direct addressing if you're wiring a custom LED matrix, or if your panel's documentation explicitly states that each row has its own select line. Because each row consumes one GPIO, Direct is practical only for low row-count panels.
+
+```python
+from hub75 import Hub75Driver, row_addressing
+from machine import Pin
+
+driver = Hub75Driver(
+    row_addressing=row_addressing.Direct(
+        base_pin=Pin(9),        # First row-select GPIO (consecutive pins for each row)
+        address_count=8         # Number of addressable rows
+    ),
+    shift_register_depth=64,
+    base_data_pin=Pin(0),
+    base_clock_pin=Pin(6),
+    output_enable_pin=Pin(8),
+)
+```
+
+The `address_count` parameter is the number of distinct rows the driver cycles through (equivalent to the scan-rate denominator — e.g., 8 for a 1/8 scan panel). The row-select pins must be on **consecutive GPIOs** starting from `base_pin`.
+
 #### `shift_register_depth`
 The number of pixels clocked into the panel per address cycle. For **standard indoor panels**, this equals the panel width.
 
 **Outdoor panels** with lower scan rates (1/4, 1/2) may light more than 2 rows simultaneously. These panels often require clocking in more data per address — for example, `width × 2` pixels if 4 rows light at once. In this case, set `shift_register_depth` to the total pixels per cycle, not just the panel width.
+
+### Row Remapping
+
+Some panels don't arrange their rows in the default "first half on top, second half on bottom" order that the driver assumes. Address lines may be wired in a non-standard order, row pairs may be interleaved, or the top-to-bottom pairing may use an unusual pattern. The optional `row_map` parameter lets you describe your panel's layout so that the driver rearranges your pixel data at conversion time — you continue writing to the display in standard top-to-bottom order and `row_map` handles the panel-specific wiring quirks.
+
+You only need this if rows come out scrambled **after** you've already verified the right `row_addressing` type, `bit_count` (or `depth` / `address_count`), and `shift_register_depth` for your panel. For the vast majority of panels, the default (identity) mapping is correct.
+
+#### The default layout
+
+Without `row_map`, the driver assumes your buffer is laid out like this for a panel with `row_address_count = N`:
+
+| Buffer row | Physical location |
+|------------|-------------------|
+| 0          | Top half, address 0 |
+| 1          | Top half, address 1 |
+| ...        | ... |
+| N - 1      | Top half, address N - 1 |
+| N          | Bottom half, address 0 |
+| ...        | ... |
+| 2N - 1     | Bottom half, address N - 1 |
+
+For a 64×64 panel with 1/32 scan (`N = 32`), rows 0–31 fill the upper half and rows 32–63 fill the lower half, paired so that the same physical address simultaneously lights row `i` and row `32 + i`.
+
+#### How the remap works
+
+`row_map` is an array of integer indices. Entry `i` tells the driver: *"when you need pixels for physical row `i`, fetch them from logical row `row_map[i]` in the input buffer."*
+
+The identity mapping — the default — is `[0, 1, 2, ..., 2N - 1]`.
+
+#### Example: swapped halves
+
+If your panel displays the top and bottom halves of the image flipped, swap the two halves of the mapping:
+
+```python
+N = 32  # row_address_count
+
+# Upper physical rows now pull from the bottom half of the buffer, and vice versa
+row_map = list(range(N, 2 * N)) + list(range(N))
+
+driver = Hub75Driver(
+    row_addressing=row_addressing.Binary(base_pin=Pin(9), bit_count=5),
+    shift_register_depth=64,
+    base_data_pin=Pin(0),
+    base_clock_pin=Pin(6),
+    output_enable_pin=Pin(8),
+    row_map=row_map,
+)
+```
+
+#### Figuring out your mapping
+
+If your panel needs a custom `row_map` but you don't know its layout, the easiest approach is:
+
+1. Start with the default (`row_map=None`).
+2. Write a test pattern that marks each logical row with a unique color — e.g. a bright stripe of a distinct hue per row.
+3. Observe where each logical row actually appears on the physical panel.
+4. Build `row_map` so that `row_map[physical_row_position] = logical_row_that_shows_up_there`.
+
+Put another way: `row_map` is the inverse of what you observe. If physical row 0 is displaying the stripe you placed at logical row 8, then `row_map[0] = 8`.
+
+#### Constraints
+
+- Length must be even and at least 2.
+- Length must divide the total pixel count (`row_address_count * shift_register_depth * 2`) evenly. The common case — one entry per row — uses length `row_address_count * 2`.
+- Every entry must be in `[0, len(row_map))`.
+- Accepts a `list`, a `tuple`, or an `array('H', ...)`. Passing `array('H', ...)` avoids an internal allocation in the constructor.
+- Longer mappings enable sub-row remapping: each entry then addresses a chunk of `pixel_count / len(row_map)` pixels, allowing more intricate rearrangements than one-per-row.
+
+The constructor raises `ValueError` if any constraint is violated.
 
 ### Gamma Correction
 
@@ -490,7 +594,8 @@ driver = Hub75Driver(
 - Verify your panel's actual scan rate matches your config
 
 **Only one row lights up, or rows appear in the wrong order?**
-- Your panel may use shift register addressing instead of binary addressing. See [Shift Register Addressing](#shift-register-addressing-some-panels) above.
+- Your panel may use shift register or direct addressing instead of binary addressing. See [Shift Register Addressing](#shift-register-addressing-some-panels) or [Direct Addressing](#direct-addressing-uncommon) above.
+- If rows are scrambled or interleaved in a repeating pattern (rather than swapped with one of the other addressing types fixing it), your panel may use a non-linear row layout. See [Row Remapping](#row-remapping) for how to correct this with the `row_map` parameter.
 
 **Flickering or dim display?**
 - Ensure adequate 5V power supply (panels can draw 2-4A at full brightness)
@@ -505,7 +610,7 @@ Edit the pin constants to match your wiring:
 BASE_DATA_PIN = 0       # First GPIO for R1,G1,B1,R2,G2,B2 (consecutive)
 BASE_CLOCK_PIN = 6      # First GPIO for CLK,LAT (consecutive)
 OUTPUT_ENABLE_PIN = 8   # GPIO for OE
-BASE_ADDRESS_PIN = 9    # First GPIO for address lines (consecutive for Binary)
+BASE_ADDRESS_PIN = 9    # First GPIO for address lines (consecutive for Binary or Direct)
 ```
 
 The driver expects pins in consecutive groups:
@@ -513,6 +618,7 @@ The driver expects pins in consecutive groups:
 - **Clock pins**: 2 consecutive GPIOs (CLK, LAT)
 - **Address pins (Binary)**: Consecutive GPIOs for each address line on your panel (varies by scan rate)
 - **Address pins (ShiftRegister)**: Clock and data pins specified individually
+- **Address pins (Direct)**: Consecutive GPIOs, one per addressable row
 
 ## API Reference
 
@@ -525,7 +631,7 @@ Low-level driver for direct hardware control.
 ```python
 Hub75Driver(
     *,
-    row_addressing: row_addressing.Binary | row_addressing.ShiftRegister,
+    row_addressing: row_addressing.Binary | row_addressing.ShiftRegister | row_addressing.Direct,
     shift_register_depth: int,
     base_data_pin: Pin,
     base_clock_pin: Pin,
@@ -535,9 +641,12 @@ Hub75Driver(
     brightness: float = 1.0,
     gamma: gamma.SRGB | gamma.Power | None = gamma.SRGB(),
     blanking_time: int = 0,
-    target_refresh_rate: float = 120.0
+    target_refresh_rate: float = 120.0,
+    row_map: list[int] | tuple[int, ...] | array | None = None
 )
 ```
+
+See [Row Remapping](#row-remapping) for when and how to set `row_map`.
 
 **Row addressing types:**
 
@@ -545,6 +654,7 @@ Hub75Driver(
 |------|-----------|-------------|
 | `row_addressing.Binary(base_pin, bit_count)` | `base_pin`: first address GPIO, `bit_count`: number of address pins | Standard binary address pins |
 | `row_addressing.ShiftRegister(data_pin, clock_pin, depth, clock_frequency=None)` | `data_pin`: data GPIO, `clock_pin`: clock GPIO, `depth`: addressable rows, `clock_frequency`: optional clock speed | Shift register row selection |
+| `row_addressing.Direct(base_pin, address_count)` | `base_pin`: first row-select GPIO, `address_count`: number of addressable rows | One dedicated pin per row (one-hot) |
 
 **Frame Operations:**
 
@@ -599,9 +709,7 @@ HUB75 panels vary widely in their internal design. This driver works great with 
 
 ### Currently Unimplemented Features
 
-**Non-linear addressing** — Some panels don't use standard binary row addressing (where A=bit 0, B=bit 1, etc.). The address lines may be remapped or interleaved in panel-specific ways. See [this ESPHome documentation](https://esphome.io/components/display/hub75/) for examples of different addressing modes.
-
-**Serpentine scan patterns** — Some panels clock data in alternating directions on each row. This requires pixel remapping that isn't currently implemented. The [PxMatrix library](https://github.com/2dom/PxMatrix) documents many of these scan patterns.
+**Serpentine scan patterns** — Some panels clock data in alternating directions on each row. This requires pixel-level remapping within a row that isn't currently implemented. The [PxMatrix library](https://github.com/2dom/PxMatrix) documents many of these scan patterns. (Non-linear row addressing — where address lines are wired in a non-standard order or row pairs are interleaved — is handled; see [Row Remapping](#row-remapping).)
 
 **Driver chip initialization** — Some LED driver chips require a special initialization sequence at power-up before they display correctly:
 
