@@ -35,3 +35,16 @@ class ShiftRegister:
     @property
     def clock_frequency(self) -> int | None:
         return self._clock_frequency
+
+class Direct:
+    def __init__(self, base_pin: Pin, address_count: int):
+        self._base_pin = base_pin
+        self._address_count = address_count
+
+    @property
+    def base_pin(self) -> Pin:
+        return self._base_pin
+
+    @property
+    def address_count(self) -> int:
+        return self._address_count

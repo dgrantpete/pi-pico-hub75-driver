@@ -9,7 +9,7 @@ from micropython import const
 import _thread
 import re
 
-from .row_addressing import Binary, ShiftRegister
+from .row_addressing import Binary, ShiftRegister, Direct
 from .gamma import SRGB, Power
 from pio_types import *
 
@@ -52,19 +52,19 @@ class _StateMachineSet:
         data_state_machine: rp2.StateMachine,
         address_state_machine: rp2.StateMachine,
         address_update_cycles: int,
-        bitplane_initialize_cycles: int,
+        bitplane_transition_extra_cycles: int,
     ):
         self.data_state_machine = data_state_machine
         self.address_state_machine = address_state_machine
         self.address_update_cycles = address_update_cycles
-        self.bitplane_initialize_cycles = bitplane_initialize_cycles
+        self.bitplane_transition_extra_cycles = bitplane_transition_extra_cycles
 
 class Hub75Driver:
     @micropython.native
     def __init__(
             self,
             *,
-            row_addressing: Binary | ShiftRegister,
+            row_addressing: Binary | ShiftRegister | Direct,
             shift_register_depth: int,
             pio: rp2.PIO | None = None,
             output_enable_pin: machine.Pin,
@@ -80,6 +80,8 @@ class Hub75Driver:
             self._row_address_count = 1 << row_addressing.bit_count
         elif isinstance(row_addressing, ShiftRegister):
             self._row_address_count = row_addressing.depth
+        elif isinstance(row_addressing, Direct):
+            self._row_address_count = row_addressing.address_count
         else:
             raise TypeError(f"Unsupported row addressing type: {type(row_addressing)}")
 
@@ -112,7 +114,7 @@ class Hub75Driver:
         self._data_state_machine = state_machine_set.data_state_machine
         self._address_state_machine = state_machine_set.address_state_machine
         self._address_update_cycles = state_machine_set.address_update_cycles
-        self._bitplane_initialize_cycles = state_machine_set.bitplane_initialize_cycles
+        self._bitplane_transition_extra_cycles = state_machine_set.bitplane_transition_extra_cycles
 
         self.set_target_refresh_rate(target_refresh_rate)
 
@@ -410,10 +412,10 @@ class Hub75Driver:
     @micropython.native
     def _estimate_refresh_rate(self, base_cycles: int, brightness: float, blanking_time: int, system_frequency: int) -> float:
         # PIO cycle overhead constants (derived from cycle-counting the assembly programs)
-        # Address SM: non-delay instructions per row
-        # mov(y,isr) + loop_exit + mov(y,osr) + loop_exit + mov(y,isr) + loop_exit + jmp(x_dec) + irq
-        ADDRESS_DISPLAY_OVERHEAD_CYCLES = const(8)
-        # Address SM sequential handshake cycles per row: update_address() + wait(minimum 1 cycle)
+        # Address SM: non-delay instructions per row (outside of increment_address())
+        # mov(y,isr) + loop_exit + mov(y,osr) + loop_exit + mov(y,isr) + loop_exit + irq
+        ADDRESS_DISPLAY_OVERHEAD_CYCLES = const(7)
+        # Address SM sequential handshake cycles per row: increment_address() + wait(minimum 1 cycle)
         address_handshake_overhead_cycles = self._address_update_cycles + 1
         # Data SM sequential handshake cycles per row: wait(LATCH_SAFE) + irq(LATCH_COMPLETE)
         DATA_HANDSHAKE_OVERHEAD_CYCLES = const(2)
@@ -422,8 +424,10 @@ class Hub75Driver:
         # Data SM per-pixel in the clocking loop: out(pins, 8) + jmp(x_dec)
         DATA_CYCLES_PER_PIXEL = const(2)
         # Address SM extra cycles per bitplane transition (not per row):
-        # out(null, 32) + out(isr, 32) + initialize_bitplane(), replacing the normal 1-cycle jmp
-        bitplane_transition_extra_cycles = 2 + self._bitplane_initialize_cycles
+        # partial increment_address() (until jmp to increment_bitplane is taken)
+        # + out(null, 32) + increment_bitplane() + out(isr, 32). The subsequent
+        # wrap back into increment_address() and row display are counted as a normal row.
+        bitplane_transition_extra_cycles = self._bitplane_transition_extra_cycles
 
         row_count = self.row_address_count
 
@@ -563,7 +567,7 @@ class Hub75Driver:
     @micropython.native
     def _create_state_machines(
         *,
-        row_addressing: Binary | ShiftRegister,
+        row_addressing: Binary | ShiftRegister | Direct,
         pio: rp2.PIO,
         pio_block_id: int,
         output_enable_pin: machine.Pin,
@@ -589,13 +593,19 @@ class Hub75Driver:
                 pull_thresh=32
             )
 
-            address_update_cycles = 1
-            bitplane_initialize_cycles = 1
+            # increment_address normal path: jmp(x_dec) taken + mov(pins, invert(x))
+            address_update_cycles = 2
+            # Partial increment_address (2: jmp(x_dec) not taken + jmp to increment_bitplane)
+            # + out(null, 32) + increment_bitplane() (1) + out(isr, 32)
+            bitplane_transition_extra_cycles = 5
 
-            def initialize_bitplane():
-                set(x, (0b1 << row_addressing.bit_count) - 1).side(OE_DEASSERTED)
+            def increment_bitplane():
+                set(x, (0b1 << row_addressing.bit_count)).side(OE_DEASSERTED)
 
-            def update_address():
+            def increment_address():
+                jmp(x_dec, "write_address")            .side(OE_DEASSERTED)
+                jmp("increment_bitplane")              .side(OE_DEASSERTED)
+                label("write_address")
                 # We invert the bits here so it counts up from 0 to the highest address
                 # (even though the x register itself counts down from the highest address to 0)
                 mov(pins, invert(x)).side(OE_DEASSERTED)
@@ -632,17 +642,67 @@ class Hub75Driver:
 
             shift_register_delay = max(0, shift_register_delay)
 
-            address_update_cycles = 3 * (1 + shift_register_delay)
-            bitplane_initialize_cycles = 2 + shift_register_delay
+            # increment_address normal path: jmp(x_dec) taken (1, no delay)
+            # + set(pins, 1)[d] + set(pins, 0)[d] + mov(pins, null)[d]
+            address_update_cycles = 1 + 3 * (1 + shift_register_delay)
+            # Partial increment_address (2: jmp(x_dec) not taken + jmp to increment_bitplane; no delays)
+            # + out(null, 32) + increment_bitplane() (2 + d) + out(isr, 32)
+            bitplane_transition_extra_cycles = 6 + shift_register_delay
 
-            def initialize_bitplane():
-                set(x, row_addressing.depth - 1).side(OE_DEASSERTED)
+            def increment_bitplane():
+                set(x, row_addressing.depth).side(OE_DEASSERTED)
                 mov(pins, invert(null)).side(OE_DEASSERTED) [shift_register_delay]
 
-            def update_address():
+            def increment_address():
+                jmp(x_dec, "write_address").side(OE_DEASSERTED)
+                jmp("increment_bitplane").side(OE_DEASSERTED)
+                label("write_address")
                 set(pins, 1).side(OE_DEASSERTED) [shift_register_delay]
                 set(pins, 0).side(OE_DEASSERTED) [shift_register_delay]
+
+                # If data pin was previously high, which is only possible after bitplane initialization,
+                # a '1' is now shifted into the shift register. If it was already low, a '0' is shifted in and
+                # will remain like that for the rest of the bitframe
                 mov(pins, null).side(OE_DEASSERTED) [shift_register_delay]
+        elif isinstance(row_addressing, Direct):
+            address_decorator = rp2.asm_pio(
+                sideset_init=rp2.PIO.OUT_HIGH,
+                out_init=[rp2.PIO.OUT_LOW] * row_addressing.address_count,
+                out_shiftdir=rp2.PIO.SHIFT_RIGHT,
+                in_shiftdir=rp2.PIO.SHIFT_RIGHT,
+                autopull=True,
+                pull_thresh=32
+            )
+
+            # increment_address normal path: mov(y, osr) + mov(osr, x) + out(null, 1)
+            # + mov(x, osr) + mov(osr, y) + jmp(not_x, ...) not taken + mov(pins, x)
+            address_update_cycles = 7
+            # Partial increment_address (6: everything up through jmp(not_x, ...) taken)
+            # + out(null, 32) + increment_bitplane() (4) + out(isr, 32)
+            bitplane_transition_extra_cycles = 12
+
+            def increment_bitplane():
+                set(x, 0b1).side(OE_DEASSERTED)
+                mov(isr, null).side(OE_DEASSERTED)
+                in_(x, 32 - row_addressing.address_count).side(OE_DEASSERTED)
+                mov(x, isr).side(OE_DEASSERTED)
+
+            def increment_address():
+                # y register is used temporarily to store the OSR contents (y isn't used until after, so its safe)
+                mov(y, osr).side(OE_DEASSERTED)
+
+                # Next instructions are equivalent to 'x >>= 1'
+                mov(osr, x).side(OE_DEASSERTED)
+                out(null, 1).side(OE_DEASSERTED)
+                mov(x, osr).side(OE_DEASSERTED)
+
+                # Restore OSR's original value
+                mov(osr, y).side(OE_DEASSERTED)
+
+                # A value of 0 means we've shifted the single '1' off the end and should start the next bitplane
+                jmp(not_x, "increment_bitplane").side(OE_DEASSERTED)
+
+                mov(pins, x).side(OE_DEASSERTED)
         else:
             raise TypeError(f"Unsupported row addressing type: {type(row_addressing)}")
 
@@ -654,17 +714,16 @@ class Hub75Driver:
             # We don't want to discard the first timing word
             # We jump over the instruction that would do so
             jmp("initialize")                      .side(OE_DEASSERTED)
-            wrap_target()
-            jmp(x_dec, "write_address")            .side(OE_DEASSERTED)
+            label("increment_bitplane")
             # Discard data from OSR to hold next delays
             out(null, 32)                          .side(OE_DEASSERTED)
             label("initialize")
+            increment_bitplane()
             # After this, ISR contains the 'off' delay from the first word, OSR contains the 'on' delay from the second word (autopulled)
             out(isr, 32)                           .side(OE_DEASSERTED)
-            initialize_bitplane()
-            label("write_address")
+            wrap_target()
+            increment_address()
             irq(_LATCH_SAFE_IRQ)                   .side(OE_DEASSERTED)
-            update_address()
             wait(1, irq, _LATCH_COMPLETE_IRQ)      .side(OE_DEASSERTED)
             mov(y, isr)                            .side(OE_DEASSERTED)
             label("off_delay_before_enable")
@@ -730,11 +789,18 @@ class Hub75Driver:
                 out_base=row_addressing.data_pin,
                 sideset_base=output_enable_pin
             )
+        elif isinstance(row_addressing, Direct):
+            address_state_machine = rp2.StateMachine(
+                address_state_machine_id,
+                address_program,
+                out_base=row_addressing.base_pin,
+                sideset_base=output_enable_pin
+            )
 
         return _StateMachineSet(
             data_state_machine=data_state_machine,
             address_state_machine=address_state_machine,
             address_update_cycles=address_update_cycles,
-            bitplane_initialize_cycles=bitplane_initialize_cycles
+            bitplane_transition_extra_cycles=bitplane_transition_extra_cycles
         )
     
