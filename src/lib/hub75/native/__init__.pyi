@@ -1,13 +1,15 @@
 def load_rgb888(
     input_data: memoryview | bytes | bytearray,
     output_data: bytearray | memoryview,
-    gamma_lut: bytearray | bytes
+    gamma_lut: bytearray | bytes,
+    row_map: memoryview | bytes | bytearray
 ) -> None: ...
 
 def load_rgb565(
     input_data: memoryview | bytes | bytearray,
     output_data: bytearray | memoryview,
-    gamma_lut: bytearray | bytes
+    gamma_lut: bytearray | bytes,
+    row_map: memoryview | bytes | bytearray
 ) -> None: ...
 
 def clear(buffer: bytearray | memoryview) -> None: ...

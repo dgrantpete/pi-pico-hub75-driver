@@ -74,7 +74,8 @@ class Hub75Driver:
             brightness: float = 1.0,
             blanking_time: int = 0,
             gamma: SRGB | Power | None = SRGB(),
-            target_refresh_rate: float = 120.0
+            target_refresh_rate: float = 120.0,
+            row_map: 'list[int] | tuple[int, ...] | array | None' = None
         ):
         if isinstance(row_addressing, Binary):
             self._row_address_count = 1 << row_addressing.bit_count
@@ -119,6 +120,14 @@ class Hub75Driver:
         self.set_target_refresh_rate(target_refresh_rate)
 
         buffer_size = self.row_address_count * shift_register_depth * COLOR_BIT_DEPTH
+        pixel_count = self.row_address_count * shift_register_depth * 2
+
+        if row_map is None:
+            row_map_array = array('H', range(self.row_address_count * 2))
+        else:
+            row_map_array = self.__class__._validate_row_map(row_map, pixel_count)
+
+        self._row_map = memoryview(row_map_array)
 
         self._buffers = [
             bytearray(buffer_size),
@@ -264,11 +273,11 @@ class Hub75Driver:
 
     @micropython.native
     def load_rgb888(self, rgb888_data: memoryview | bytes | bytearray):
-        native.load_rgb888(rgb888_data, self._inactive_buffer, self._gamma_lut)
+        native.load_rgb888(rgb888_data, self._inactive_buffer, self._gamma_lut, self._row_map)
 
     @micropython.native
     def load_rgb565(self, rgb565_data: memoryview | bytes | bytearray):
-        native.load_rgb565(rgb565_data, self._inactive_buffer, self._gamma_lut)
+        native.load_rgb565(rgb565_data, self._inactive_buffer, self._gamma_lut, self._row_map)
 
     @micropython.native
     def clear(self):
@@ -356,6 +365,30 @@ class Hub75Driver:
         self._gamma = gamma
         self._gamma_lut = Hub75Driver._create_gamma_lut(self._gamma)
         return self._gamma
+
+    @staticmethod
+    @micropython.native
+    def _validate_row_map(row_map, pixel_count: int) -> array:
+        chunk_count = len(row_map)
+
+        if chunk_count < 2 or chunk_count % 2 != 0:
+            raise ValueError(f"row_map length must be even and at least 2 (got {chunk_count})")
+
+        if pixel_count % chunk_count != 0:
+            raise ValueError(
+                f"row_map length ({chunk_count}) must divide the pixel count ({pixel_count}) evenly"
+            )
+
+        validated = array('H', row_map)
+
+        for index in range(chunk_count):
+            value = validated[index]
+            if value >= chunk_count:
+                raise ValueError(
+                    f"row_map[{index}] = {value} is out of range [0, {chunk_count})"
+                )
+
+        return validated
 
     @staticmethod
     @micropython.native

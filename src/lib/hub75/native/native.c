@@ -19,14 +19,16 @@ static mp_obj_t clear(mp_obj_t buffer_obj) {
     return mp_const_none;
 }
 
-static mp_obj_t load_rgb888(mp_obj_t input_obj, mp_obj_t output_obj, mp_obj_t gamma_lut_obj) {
+static mp_obj_t load_rgb888(size_t n_args, const mp_obj_t *args) {
     mp_buffer_info_t input_buffer;
     mp_buffer_info_t output_buffer;
     mp_buffer_info_t gamma_lut_buffer;
+    mp_buffer_info_t row_map_buffer;
 
-    mp_get_buffer_raise(input_obj, &input_buffer, MP_BUFFER_READ);
-    mp_get_buffer_raise(output_obj, &output_buffer, MP_BUFFER_WRITE);
-    mp_get_buffer_raise(gamma_lut_obj, &gamma_lut_buffer, MP_BUFFER_READ);
+    mp_get_buffer_raise(args[0], &input_buffer, MP_BUFFER_READ);
+    mp_get_buffer_raise(args[1], &output_buffer, MP_BUFFER_WRITE);
+    mp_get_buffer_raise(args[2], &gamma_lut_buffer, MP_BUFFER_READ);
+    mp_get_buffer_raise(args[3], &row_map_buffer, MP_BUFFER_READ);
 
     const uint8_t *input_data = (const uint8_t *)input_buffer.buf;
 
@@ -34,6 +36,9 @@ static mp_obj_t load_rgb888(mp_obj_t input_obj, mp_obj_t output_obj, mp_obj_t ga
     size_t output_size = output_buffer.len;
 
     const uint8_t *gamma_lut = (const uint8_t *)gamma_lut_buffer.buf;
+
+    const uint16_t *row_map = (const uint16_t *)row_map_buffer.buf;
+    size_t chunk_count = row_map_buffer.len / sizeof(uint16_t);
 
     size_t pixel_count = (output_size / COLOR_BIT_DEPTH) * 2;
 
@@ -47,19 +52,29 @@ static mp_obj_t load_rgb888(mp_obj_t input_obj, mp_obj_t output_obj, mp_obj_t ga
         mp_raise_ValueError(MP_ERROR_TEXT("Gamma LUT size does not match expected size for color bit depth"));
     }
 
-    load_rgb888_kernel(input_data, pixel_count, output_data, gamma_lut);
+    if (chunk_count < 2 || (chunk_count & 1) != 0) {
+        mp_raise_ValueError(MP_ERROR_TEXT("Row map length must be even and at least 2"));
+    }
+
+    if (pixel_count % chunk_count != 0) {
+        mp_raise_ValueError(MP_ERROR_TEXT("Row map length must divide pixel count evenly"));
+    }
+
+    load_rgb888_kernel(input_data, pixel_count, output_data, gamma_lut, row_map, chunk_count);
 
     return mp_const_none;
 }
 
-static mp_obj_t load_rgb565(mp_obj_t input_obj, mp_obj_t output_obj, mp_obj_t gamma_lut_obj) {
+static mp_obj_t load_rgb565(size_t n_args, const mp_obj_t *args) {
     mp_buffer_info_t input_buffer;
     mp_buffer_info_t output_buffer;
     mp_buffer_info_t gamma_lut_buffer;
+    mp_buffer_info_t row_map_buffer;
 
-    mp_get_buffer_raise(input_obj, &input_buffer, MP_BUFFER_READ);
-    mp_get_buffer_raise(output_obj, &output_buffer, MP_BUFFER_WRITE);
-    mp_get_buffer_raise(gamma_lut_obj, &gamma_lut_buffer, MP_BUFFER_READ);
+    mp_get_buffer_raise(args[0], &input_buffer, MP_BUFFER_READ);
+    mp_get_buffer_raise(args[1], &output_buffer, MP_BUFFER_WRITE);
+    mp_get_buffer_raise(args[2], &gamma_lut_buffer, MP_BUFFER_READ);
+    mp_get_buffer_raise(args[3], &row_map_buffer, MP_BUFFER_READ);
 
     const uint8_t *input_data = (const uint8_t *)input_buffer.buf;
 
@@ -67,6 +82,9 @@ static mp_obj_t load_rgb565(mp_obj_t input_obj, mp_obj_t output_obj, mp_obj_t ga
     size_t output_size = output_buffer.len;
 
     const uint8_t *gamma_lut = (const uint8_t *)gamma_lut_buffer.buf;
+
+    const uint16_t *row_map = (const uint16_t *)row_map_buffer.buf;
+    size_t chunk_count = row_map_buffer.len / sizeof(uint16_t);
 
     size_t pixel_count = (output_size / COLOR_BIT_DEPTH) * 2;
 
@@ -80,7 +98,15 @@ static mp_obj_t load_rgb565(mp_obj_t input_obj, mp_obj_t output_obj, mp_obj_t ga
         mp_raise_ValueError(MP_ERROR_TEXT("Gamma LUT size does not match expected size for color bit depth"));
     }
 
-    load_rgb565_kernel(input_data, pixel_count, output_data, gamma_lut);
+    if (chunk_count < 2 || (chunk_count & 1) != 0) {
+        mp_raise_ValueError(MP_ERROR_TEXT("Row map length must be even and at least 2"));
+    }
+
+    if (pixel_count % chunk_count != 0) {
+        mp_raise_ValueError(MP_ERROR_TEXT("Row map length must divide pixel count evenly"));
+    }
+
+    load_rgb565_kernel(input_data, pixel_count, output_data, gamma_lut, row_map, chunk_count);
 
     return mp_const_none;
 }
@@ -126,8 +152,8 @@ static mp_obj_t hsv_to_rgb(mp_obj_t h_obj, mp_obj_t s_obj, mp_obj_t v_obj) {
     return mp_obj_new_tuple(3, items);
 }
 
-static MP_DEFINE_CONST_FUN_OBJ_3(load_rgb888_obj, load_rgb888);
-static MP_DEFINE_CONST_FUN_OBJ_3(load_rgb565_obj, load_rgb565);
+static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(load_rgb888_obj, 4, 4, load_rgb888);
+static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(load_rgb565_obj, 4, 4, load_rgb565);
 static MP_DEFINE_CONST_FUN_OBJ_1(clear_obj, clear);
 static MP_DEFINE_CONST_FUN_OBJ_3(pack_hsv_to_rgb565_obj, pack_hsv_to_rgb565);
 static MP_DEFINE_CONST_FUN_OBJ_3(pack_hsv_to_rgb888_obj, pack_hsv_to_rgb888);
