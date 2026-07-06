@@ -7,7 +7,6 @@ from array import array
 from .constants import COLOR_BIT_DEPTH
 from micropython import const
 import _thread
-import re
 
 from .row_addressing import Binary, ShiftRegister, Direct
 from .gamma import SRGB, Power
@@ -42,8 +41,6 @@ _PIO_IRQ_OFFSET = const(0x030)
 _PIO_IRQ_FORCE_OFFSET = const(0x034)
 
 _PIO_TX_FLAG_BASE_INDEX = const(24)
-
-_PIO_INDEX_EXPRESSION = re.compile(r'PIO\((\d)\)')
 
 class _StateMachineSet:
     def __init__(
@@ -184,7 +181,6 @@ class Hub75Driver:
         state_machine_set = self.__class__._create_state_machines(
             row_addressing=row_addressing,
             pio=self._pio,
-            pio_block_id=self._pio_block_id,
             output_enable_pin=output_enable_pin,
             base_data_pin=base_data_pin,
             base_clock_pin=base_clock_pin,
@@ -787,18 +783,19 @@ class Hub75Driver:
     @staticmethod
     @micropython.native
     def _get_pio_index(pio: rp2.PIO) -> int:
-        # Micropython API doesn't expose PIO index as a direct integer, so we need to (unfortunately) extract it from its string representation
-        match = _PIO_INDEX_EXPRESSION.match(repr(pio))
-
-        if not match:
-            raise ValueError(f"Could not determine PIO index: '{pio!r}'")
-
-        return int(match.group(1))
-
-    @staticmethod
-    @micropython.native
-    def _get_absolute_state_machine_id(pio_block_id: int, state_machine_offset: int) -> int:
-        return pio_block_id * 4 + state_machine_offset
+        # The numeric block id is still genuinely needed (DMA DREQ numbers and
+        # raw register base addresses live in the integer domain), but we can
+        # recover it without parsing repr(): rp2.PIO(i) returns a pointer into
+        # a static C array (one object per block), so identity comparison is
+        # guaranteed. Probing past the chip's block count raises ValueError
+        # (2 blocks on RP2040, 3 on RP2350).
+        for index in range(len(_PIO_BASE_ADDRESSES)):
+            try:
+                if pio is rp2.PIO(index):
+                    return index
+            except ValueError:
+                break
+        raise ValueError(f"Could not determine PIO index: '{pio!r}'")
 
     @staticmethod
     @micropython.native
@@ -821,7 +818,6 @@ class Hub75Driver:
         *,
         row_addressing: Binary | ShiftRegister | Direct,
         pio: rp2.PIO,
-        pio_block_id: int,
         output_enable_pin: machine.Pin,
         base_data_pin: machine.Pin,
         base_clock_pin: machine.Pin,
@@ -829,13 +825,6 @@ class Hub75Driver:
         shift_register_depth: int,
         system_frequency: int
     ) -> _StateMachineSet:
-        data_state_machine_id = Hub75Driver._get_absolute_state_machine_id(
-            pio_block_id, _DATA_STATE_MACHINE_OFFSET
-        )
-        address_state_machine_id = Hub75Driver._get_absolute_state_machine_id(
-            pio_block_id, _ADDRESS_STATE_MACHINE_OFFSET
-        )
-
         if isinstance(row_addressing, Binary):
             address_decorator = rp2.asm_pio(
                 sideset_init=rp2.PIO.OUT_HIGH,
@@ -1059,8 +1048,10 @@ class Hub75Driver:
         # Clear ALL programs in this PIO so we're starting from a blank slate
         pio.remove_program()
 
-        data_state_machine = rp2.StateMachine(
-            data_state_machine_id,
+        # Constructed via the block's own factory (offsets relative to `pio`),
+        # so no absolute state machine ids are needed.
+        data_state_machine = pio.state_machine(
+            _DATA_STATE_MACHINE_OFFSET,
             data_program,
             out_base=base_data_pin,
             sideset_base=base_clock_pin,
@@ -1071,23 +1062,23 @@ class Hub75Driver:
         data_state_machine.put(shift_register_depth - 1)
 
         if isinstance(row_addressing, Binary):
-            address_state_machine = rp2.StateMachine(
-                address_state_machine_id,
+            address_state_machine = pio.state_machine(
+                _ADDRESS_STATE_MACHINE_OFFSET,
                 address_program,
                 out_base=row_addressing.base_pin,
                 sideset_base=output_enable_pin
             )
         elif isinstance(row_addressing, ShiftRegister):
-            address_state_machine = rp2.StateMachine(
-                address_state_machine_id,
+            address_state_machine = pio.state_machine(
+                _ADDRESS_STATE_MACHINE_OFFSET,
                 address_program,
                 set_base=row_addressing.clock_pin,
                 out_base=row_addressing.data_pin,
                 sideset_base=output_enable_pin
             )
         elif isinstance(row_addressing, Direct):
-            address_state_machine = rp2.StateMachine(
-                address_state_machine_id,
+            address_state_machine = pio.state_machine(
+                _ADDRESS_STATE_MACHINE_OFFSET,
                 address_program,
                 out_base=row_addressing.base_pin,
                 sideset_base=output_enable_pin
